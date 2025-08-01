@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Danted Proxy Admin Panel</title>
+<style>
+  body { font-family: Arial, sans-serif; margin: 20px; background: #f0f0f0; }
+  h1 { text-align: center; }
+  table { width: 100%; border-collapse: collapse; background: white; }
+  th, td { padding: 10px; border: 1px solid #ccc; text-align: left; }
+  th { background: #333; color: white; }
+</style>
+</head>
+<body>
+  <h1>Danted Proxy Admin Panel</h1>
+  <table id="connections-table">
+    <thead>
+      <tr>
+        <th>Client IP</th>
+        <th>Target IP</th>
+        <th>Port</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <script>
+    async function fetchConnections() {
+      try {
+        const res = await fetch('/api/connections');
+        if (!res.ok) throw new Error('Failed to fetch');
+        const data = await res.json();
+        const tbody = document.querySelector('#connections-table tbody');
+        tbody.innerHTML = '';
+        if (data.connections.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="3">No active connections</td></tr>';
+          return;
+        }
+        for (const conn of data.connections) {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td>${conn.clientIp}</td>
+            <td>${conn.targetIp}</td>
+            <td>${conn.port}</td>
+          `;
+          tbody.appendChild(tr);
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    fetchConnections();
+    setInterval(fetchConnections, 10000);
+  </script>
+</body>
+</html>
