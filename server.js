@@ -1,86 +1,116 @@
-// server.js
 const express = require('express');
+const session = require('express-session');
+const bodyParser = require('body-parser');
+const { exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+
 const app = express();
-
 const PORT = process.env.PORT || 3000;
-const LOG_PATH = process.env.DANTED_LOG_PATH || 'syslog';
 
-// Basic Auth Middleware
+const MUSIC_DIR = path.join(__dirname, 'music');
+if (!fs.existsSync(MUSIC_DIR)) fs.mkdirSync(MUSIC_DIR);
+
 const USERNAME = process.env.ADMIN_USER || 'admin';
 const PASSWORD = process.env.ADMIN_PASS || 'password';
 
-function basicAuth(req, res, next) {
-  const auth = req.headers.authorization;
-  if (!auth) {
-    res.set('WWW-Authenticate', 'Basic realm="Admin Panel"');
-    return res.status(401).send('Authentication required.');
-  }
-  const [, encoded] = auth.split(' ');
-  const [user, pass] = Buffer.from(encoded, 'base64').toString().split(':');
-  if (user === USERNAME && pass === PASSWORD) {
+app.use(bodyParser.urlencoded({ extended: true }));
+app.use(session({
+  secret: 'replace_with_a_secure_secret',
+  resave: false,
+  saveUninitialized: false,
+}));
+
+// Simple auth middleware
+function requireAuth(req, res, next) {
+  if (req.session && req.session.authenticated) {
     return next();
   }
-  res.set('WWW-Authenticate', 'Basic realm="Admin Panel"');
-  return res.status(401).send('Invalid credentials.');
+  res.redirect('/login');
 }
 
-// Parse connections from log (simple heuristic)
-function parseConnections(logContent) {
-  // danted logs lines like:
-  // connect from <client-ip> to <target-ip> port <port>
-  // disconnect from <client-ip>
-  // We’ll keep a simple map of active connections
+app.get('/login', (req, res) => {
+  res.send(`
+    <h2>Login</h2>
+    <form method="POST" action="/login">
+      <input name="username" placeholder="Username" required /><br/>
+      <input name="password" type="password" placeholder="Password" required /><br/>
+      <button>Login</button>
+    </form>
+  `);
+});
 
-  const lines = logContent.trim().split('\n');
-  const activeConns = new Map();
-
-  for (const line of lines) {
-    // example: "connect from 192.168.1.10 to 8.8.8.8 port 80"
-    let connectMatch = line.match(/connect from ([\d\.]+) to ([\d\.]+) port (\d+)/);
-    if (connectMatch) {
-      const [_, clientIp, targetIp, port] = connectMatch;
-      activeConns.set(clientIp, {
-        clientIp,
-        targetIp,
-        port: Number(port),
-        startTime: null,
-        bytesTransferred: 0,
-      });
-    }
-    // example: "disconnect from 192.168.1.10"
-    let disconnectMatch = line.match(/disconnect from ([\d\.]+)/);
-    if (disconnectMatch) {
-      const clientIp = disconnectMatch[1];
-      activeConns.delete(clientIp);
-    }
+app.post('/login', (req, res) => {
+  const { username, password } = req.body;
+  if (username === USERNAME && password === PASSWORD) {
+    req.session.authenticated = true;
+    res.redirect('/');
+  } else {
+    res.send('Invalid credentials. <a href="/login">Try again</a>');
   }
+});
 
-  // We can’t get bytesTransferred or startTime from logs easily
-  // so just show what we have
-
-  return Array.from(activeConns.values());
-}
-
-app.use(express.static(path.join(__dirname, 'public')));
-app.use(basicAuth);
-
-app.get('/api/connections', (req, res) => {
-  fs.readFile(LOG_PATH, 'utf8', (err, data) => {
-    if (err) {
-      return res.status(500).json({ error: 'Cannot read log file.' });
-    }
-    try {
-      const conns = parseConnections(data);
-      return res.json({ connections: conns });
-    } catch (e) {
-      return res.status(500).json({ error: 'Failed to parse log file.' });
-    }
+app.get('/logout', (req, res) => {
+  req.session.destroy(() => {
+    res.redirect('/login');
   });
 });
 
+app.use(requireAuth);
+
+app.get('/', (req, res) => {
+  fs.readdir(MUSIC_DIR, (err, files) => {
+    if (err) return res.status(500).send('Error reading music directory.');
+    const mp3Files = files.filter(f => f.endsWith('.mp3'));
+
+    const listItems = mp3Files.map(file => {
+      return `
+      <li>
+        ${file} 
+        <audio controls src="/music/${encodeURIComponent(file)}"></audio>
+      </li>`;
+    }).join('\n');
+
+    res.send(`
+      <h1>My Music Library</h1>
+      <a href="/logout">Logout</a>
+      <h3>Download from YouTube</h3>
+      <form method="POST" action="/download">
+        <input name="url" placeholder="YouTube URL" required style="width: 300px;" />
+        <button>Download</button>
+      </form>
+      <h3>Music Files</h3>
+      <ul>${listItems || '<li>No music files found.</li>'}</ul>
+    `);
+  });
+});
+
+app.post('/download', (req, res) => {
+  const url = req.body.url;
+  if (!url || !url.startsWith('http')) {
+    return res.send('Invalid URL. <a href="/">Go back</a>');
+  }
+
+  // Generate output filename template
+  // Save as mp3 in MUSIC_DIR, sanitize name to avoid weird chars
+  const outputTemplate = path.join(MUSIC_DIR, '%(title)s.%(ext)s');
+
+  // Run yt-dlp to extract audio only as mp3
+  const cmd = `yt-dlp -x --audio-format mp3 --output "${outputTemplate}" "${url}"`;
+
+  exec(cmd, (error, stdout, stderr) => {
+    if (error) {
+      console.error('yt-dlp error:', error);
+      return res.send(`Download failed: ${error.message} <br/><a href="/">Go back</a>`);
+    }
+    console.log('yt-dlp output:', stdout);
+    res.redirect('/');
+  });
+});
+
+// Serve music files statically
+app.use('/music', express.static(MUSIC_DIR));
+
 app.listen(PORT, () => {
-  console.log(`Admin panel listening on port ${PORT}`);
-  console.log(`Using danted log file at: ${LOG_PATH}`);
+  console.log(`Music server running at http://localhost:${PORT}`);
 });
